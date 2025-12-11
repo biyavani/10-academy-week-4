@@ -1,4 +1,3 @@
-````markdown
 # Credit Risk Probability Model for Alternative Data
 
 This repository contains an end to end implementation of a credit risk probability model for Bati Bank.  
@@ -91,5 +90,4 @@ This Credit Scoring Business Understanding section summarizes:
 * Why, in the absence of a direct default label, we construct a proxy risk variable and what risks this brings.
 * The main trade offs between simple models such as logistic regression and more complex models such as gradient boosting in the context of credit risk modeling.
 
-````
 
