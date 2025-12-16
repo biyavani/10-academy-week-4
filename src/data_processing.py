@@ -279,6 +279,45 @@ def run_data_processing(
 
     return pipeline, processed_df
 
+def compute_rfm_features(
+    df: pd.DataFrame,
+    customer_id_col: str = "CustomerId",
+    datetime_col: str = "TransactionStartTime",
+    monetary_col: str = "Value",
+) -> Tuple[pd.DataFrame, pd.Timestamp]:
+    """
+    Compute RFM (Recency, Frequency, Monetary) per customer.
+
+    Recency: days since last transaction (higher means less recent).
+    Frequency: number of transactions.
+    Monetary: total transaction value.
+    """
+    if customer_id_col not in df.columns:
+        raise ValueError(f"{customer_id_col!r} not in dataframe")
+    if datetime_col not in df.columns:
+        raise ValueError(f"{datetime_col!r} not in dataframe")
+    if monetary_col not in df.columns:
+        raise ValueError(f"{monetary_col!r} not in dataframe")
+
+    df = df.copy()
+    df[datetime_col] = pd.to_datetime(df[datetime_col], utc=True, errors="coerce")
+
+    # Snapshot date: one day after the last transaction in the data
+    snapshot_date = df[datetime_col].max() + pd.Timedelta(days=1)
+
+    rfm = (
+        df.groupby(customer_id_col)
+        .agg(
+            recency=(datetime_col, lambda x: (snapshot_date - x.max()).days),
+            frequency=(customer_id_col, "size"),
+            monetary=(monetary_col, "sum"),
+        )
+        .reset_index()
+    )
+
+    return rfm, snapshot_date
+
+
 
 def compute_woe_iv(
     df: pd.DataFrame,
