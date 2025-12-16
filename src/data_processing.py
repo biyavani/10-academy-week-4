@@ -505,10 +505,15 @@ def build_model_dataset_with_proxy_target(
 
 
 if __name__ == "__main__":
-    print("Running data processing...")
     try:
+        print("Running data processing (Task 3)...")
         pipe, processed = run_data_processing()
         print("Processed data shape:", processed.shape)
         print(f"Saved processed features to: {DEFAULT_PROCESSED_PATH}")
+
+        print("\nRunning proxy target engineering (Task 4)...")
+        customer_df, rfm_labeled = build_model_dataset_with_proxy_target()
+        print("Customer level dataset shape:", customer_df.shape)
+
     except FileNotFoundError:
         print("Raw data not found. Place data.csv in data/raw before running this script.")
