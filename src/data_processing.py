@@ -11,6 +11,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xverse.transformer import WOE
+from sklearn.cluster import KMeans   
 
 
 class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
@@ -238,13 +239,6 @@ def run_data_processing(
     processed_data_path: Optional[Union[str, Path]] = None,
     target_col: str = "FraudResult",
 ):
-    """
-    Run the full preprocessing pipeline on the raw data.
-
-    Saves a processed CSV to data/processed and returns:
-      - fitted pipeline
-      - processed dataframe (features + target)
-    """
     df = load_raw_data(raw_data_path)
     if target_col not in df.columns:
         raise ValueError(f"Target column {target_col!r} not in data")
@@ -252,6 +246,11 @@ def run_data_processing(
     # Separate features and target
     y = df[target_col].copy()
     X = df.drop(columns=[target_col])
+
+    # Keep CustomerId for later merge with RFM labels
+    if "CustomerId" not in X.columns:
+        raise ValueError("CustomerId column is missing from the data")
+    customer_ids = X["CustomerId"].copy()
 
     pipeline = build_preprocessing_pipeline()
     X_processed = pipeline.fit_transform(X, y)
@@ -266,6 +265,8 @@ def run_data_processing(
 
     processed_df = pd.DataFrame(X_processed, columns=feature_names)
 
+    # Add CustomerId and original FraudResult back as columns
+    processed_df["CustomerId"] = customer_ids.values
     processed_df[target_col] = y.values
 
     out_path = (
