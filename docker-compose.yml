@@ -1,0 +1,8 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    container_name: credit-risk-api
+    ports:
+      - "8080:8080"

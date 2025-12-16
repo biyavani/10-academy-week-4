@@ -6,3 +6,5 @@ jupyter
 xverse
 mlflow
 pytest
+fastapi
+uvicorn[standard]
