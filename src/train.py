@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Tuple
 
+import joblib
 import mlflow
 import mlflow.sklearn
 import numpy as np
@@ -20,7 +21,6 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 
-
 RANDOM_STATE = 42
 
 # Paths
@@ -34,7 +34,7 @@ def load_model_data(path: Path = DATA_PATH) -> pd.DataFrame:
     """
     if not path.exists():
         raise FileNotFoundError(
-            f"Model data not found at {path}. Run Task 4 pipeline first "
+            f"Model data not found at {path}. Run data_processing pipeline first "
             "to generate model_data_customers.csv."
         )
     df = pd.read_csv(path)
@@ -45,7 +45,7 @@ def load_model_data(path: Path = DATA_PATH) -> pd.DataFrame:
 
 def train_test_split_data(
     df: pd.DataFrame, test_size: float = 0.2
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     """
     Split data into train and test sets.
 
@@ -66,10 +66,10 @@ def train_test_split_data(
 
 def evaluate_model(
     model,
-    X_train: np.ndarray,
-    X_test: np.ndarray,
-    y_train: np.ndarray,
-    y_test: np.ndarray,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_train: pd.Series,
+    y_test: pd.Series,
 ) -> Dict[str, float]:
     """
     Compute Accuracy, Precision, Recall, F1 and ROC AUC on train and test sets.
@@ -98,7 +98,7 @@ def evaluate_model(
 
 
 def train_logistic_regression(
-    X_train: np.ndarray, y_train: np.ndarray
+    X_train: pd.DataFrame, y_train: pd.Series
 ) -> Tuple[LogisticRegression, Dict[str, float]]:
     """
     Logistic Regression with GridSearchCV.
@@ -106,7 +106,7 @@ def train_logistic_regression(
     base_model = LogisticRegression(
         max_iter=1000,
         class_weight="balanced",
-        solver="liblinear",  # works well for small grids and l1/l2
+        solver="liblinear",
         random_state=RANDOM_STATE,
     )
 
@@ -131,7 +131,7 @@ def train_logistic_regression(
 
 
 def train_gradient_boosting(
-    X_train: np.ndarray, y_train: np.ndarray
+    X_train: pd.DataFrame, y_train: pd.Series
 ) -> Tuple[GradientBoostingClassifier, Dict[str, float]]:
     """
     Gradient Boosting with RandomizedSearchCV.
@@ -165,14 +165,14 @@ def train_gradient_boosting(
 def run_experiment(
     model_name: str,
     train_fn,
-    X_train: np.ndarray,
-    X_test: np.ndarray,
-    y_train: np.ndarray,
-    y_test: np.ndarray,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_train: pd.Series,
+    y_test: pd.Series,
     registered_model_name: str,
 ):
     """
-    Wraps training and evaluation in an MLflow run.
+    Wrap training and evaluation in an MLflow run.
     """
     with mlflow.start_run(run_name=model_name):
         # Train model with tuning
@@ -200,7 +200,7 @@ def run_experiment(
 
 
 def main():
-    # Set up MLflow experiment (stored locally in ./mlruns by default)
+    # Set up MLflow experiment
     mlflow.set_experiment("credit_risk_is_high_risk")
 
     # 1. Load data
@@ -208,10 +208,11 @@ def main():
 
     # 2. Train test split
     X_train, X_test, y_train, y_test = train_test_split_data(df)
+    feature_names = X_train.columns.tolist()
 
     # 3. Run Logistic Regression experiment
     print("Training Logistic Regression...")
-    run_experiment(
+    logreg_model, logreg_metrics = run_experiment(
         model_name="logistic_regression",
         train_fn=train_logistic_regression,
         X_train=X_train,
@@ -223,7 +224,7 @@ def main():
 
     # 4. Run Gradient Boosting experiment
     print("\nTraining Gradient Boosting...")
-    run_experiment(
+    gb_model, gb_metrics = run_experiment(
         model_name="gradient_boosting",
         train_fn=train_gradient_boosting,
         X_train=X_train,
@@ -233,6 +234,33 @@ def main():
         registered_model_name="credit_risk_gb",
     )
 
+    # 5. Pick best model by test_roc_auc
+    best_model_name = "logistic_regression"
+    best_model = logreg_model
+    best_metrics = logreg_metrics
+
+    if gb_metrics["test_roc_auc"] > best_metrics["test_roc_auc"]:
+        best_model_name = "gradient_boosting"
+        best_model = gb_model
+        best_metrics = gb_metrics
+
+    print(f"\nBest model is: {best_model_name}")
+    print(f"Best test ROC AUC: {best_metrics['test_roc_auc']:.4f}")
+
+    # 6. Save best model to disk for the API
+    models_dir = PROJECT_ROOT / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    model_artifact = {
+        "model": best_model,
+        "feature_names": feature_names,
+    }
+
+    out_path = models_dir / "best_model.joblib"
+    joblib.dump(model_artifact, out_path)
+    print(f"Saved best model ({best_model_name}) to {out_path}")
+
 
 if __name__ == "__main__":
     main()
+    
