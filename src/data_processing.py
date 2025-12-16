@@ -348,6 +348,58 @@ def cluster_customers_rfm(
 
     return rfm_clustered, scaler, kmeans
 
+def label_high_risk_cluster(
+    rfm_clustered: pd.DataFrame,
+    customer_id_col: str = "CustomerId",
+) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
+    """
+    Identify the least engaged RFM cluster and create is_high_risk.
+
+    Least engaged means:
+      - high recency (long time since last transaction)
+      - low frequency
+      - low monetary
+    """
+    if "rfm_cluster" not in rfm_clustered.columns:
+        raise ValueError("rfm_cluster column is missing. Run cluster_customers_rfm first.")
+
+    summary = (
+        rfm_clustered
+        .groupby("rfm_cluster")
+        .agg(
+            avg_recency=("recency", "mean"),
+            avg_frequency=("frequency", "mean"),
+            avg_monetary=("monetary", "mean"),
+            customer_count=(customer_id_col, "nunique"),
+        )
+        .reset_index()
+    )
+
+    # Normalize metrics to [0, 1] to build a simple risk score
+    for col in ["avg_recency", "avg_frequency", "avg_monetary"]:
+        cmin = summary[col].min()
+        cmax = summary[col].max()
+        if cmax > cmin:
+            summary[col + "_norm"] = (summary[col] - cmin) / (cmax - cmin)
+        else:
+            summary[col + "_norm"] = 0.0
+
+    # Higher recency increases risk, higher frequency and monetary decrease risk
+    summary["risk_score"] = (
+        summary["avg_recency_norm"]
+        - summary["avg_frequency_norm"]
+        - summary["avg_monetary_norm"]
+    )
+
+    # Cluster with the highest risk_score is treated as high risk
+    high_risk_cluster = int(
+        summary.sort_values("risk_score", ascending=False).iloc[0]["rfm_cluster"]
+    )
+
+    rfm_labeled = rfm_clustered.copy()
+    rfm_labeled["is_high_risk"] = (rfm_labeled["rfm_cluster"] == high_risk_cluster).astype(int)
+
+    return rfm_labeled, summary, high_risk_cluster
 
 def compute_woe_iv(
     df: pd.DataFrame,
