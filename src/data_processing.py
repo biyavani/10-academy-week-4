@@ -10,8 +10,13 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from xverse.transformer import WOE
-from sklearn.cluster import KMeans   
+from sklearn.cluster import KMeans
+
+# Optional import for Weight of Evidence
+try:
+    from xverse.transformer import WOE
+except ModuleNotFoundError:
+    WOE = None
 
 
 class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
@@ -24,6 +29,7 @@ class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
       - txn_count: number of transactions per customer
       - std_amount: standard deviation of Amount per customer
     """
+
     def __init__(
         self,
         customer_id_col: str = "CustomerId",
@@ -31,6 +37,7 @@ class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
     ):
         self.customer_id_col = customer_id_col
         self.amount_col = amount_col
+        self._agg_features_: Optional[pd.DataFrame] = None
 
     def fit(self, X: pd.DataFrame, y=None):
         if self.customer_id_col not in X.columns:
@@ -38,7 +45,6 @@ class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
         if self.amount_col not in X.columns:
             raise ValueError(f"Column {self.amount_col!r} not in input data")
 
-        # Group by customer and compute aggregate features
         agg = (
             X.groupby(self.customer_id_col)[self.amount_col]
             .agg(
@@ -55,7 +61,7 @@ class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X: pd.DataFrame):
-        if not hasattr(self, "_agg_features_"):
+        if self._agg_features_ is None:
             raise RuntimeError("The transformer has not been fitted yet.")
         X = X.copy()
         agg = self._agg_features_
@@ -63,13 +69,13 @@ class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
         # Left join so each transaction row gets customer level features
         X = X.merge(agg, on=self.customer_id_col, how="left", validate="m:1")
         return X
-    
 
 
 class DateTimeFeatures(BaseEstimator, TransformerMixin):
     """
-    Extracts hour, day, month, year from TransactionStartTime.
+    Extract hour, day, month, year from TransactionStartTime.
     """
+
     def __init__(self, datetime_col: str = "TransactionStartTime"):
         self.datetime_col = datetime_col
 
@@ -92,6 +98,7 @@ class ColumnDropper(BaseEstimator, TransformerMixin):
     """
     Drops a list of columns if they exist.
     """
+
     def __init__(self, columns: Optional[List[str]] = None):
         self.columns = columns or []
 
@@ -102,15 +109,16 @@ class ColumnDropper(BaseEstimator, TransformerMixin):
         X = X.copy()
         drop_cols = [c for c in self.columns if c in X.columns]
         return X.drop(columns=drop_cols)
-    
+
+
 class WOETransformer(BaseEstimator, TransformerMixin):
     """
-    Thin wrapper around xverse.transformer.WOE so it can be used like a normal
+    Wrapper around xverse.transformer.WOE so it can be used like a normal
     scikit learn transformer.
 
-    This is optional and used mainly for inspecting Weight of Evidence
-    and Information Value.
+    This is useful for inspecting Weight of Evidence and Information Value.
     """
+
     def __init__(
         self,
         feature_names: Union[str, List[str]] = "all",
@@ -118,6 +126,9 @@ class WOETransformer(BaseEstimator, TransformerMixin):
     ):
         self.feature_names = feature_names
         self.exclude_features = exclude_features
+        self._woe = None
+        self.woe_df_: Optional[pd.DataFrame] = None
+        self.iv_df_: Optional[pd.DataFrame] = None
 
     def fit(self, X: pd.DataFrame, y: Union[pd.Series, np.ndarray]):
         if WOE is None:
@@ -130,12 +141,13 @@ class WOETransformer(BaseEstimator, TransformerMixin):
             exclude_features=self.exclude_features,
         )
         self._woe.fit(X, y)
-        # Save WoE and IV tables for later inspection
         self.iv_df_ = self._woe.iv_df.copy()
         self.woe_df_ = self._woe.woe_df.copy()
         return self
 
     def transform(self, X: pd.DataFrame):
+        if self._woe is None:
+            raise RuntimeError("WOETransformer has not been fitted yet.")
         return self._woe.transform(X)
 
 
@@ -146,7 +158,7 @@ def build_preprocessing_pipeline() -> Pipeline:
     Steps:
       1. CustomerAggregateFeatures - aggregate Amount per CustomerId
       2. DateTimeFeatures - extract hour/day/month/year
-      3. ColumnDropper - drop ID like columns
+      3. ColumnDropper - drop ID like and constant columns
       4. ColumnTransformer - impute missing, scale numerics, one hot encode categoricals
     """
 
@@ -181,11 +193,11 @@ def build_preprocessing_pipeline() -> Pipeline:
         ]
     )
 
-    # Categorical pipeline: impute then one hot encode
+    # Categorical pipeline: impute then one hot encode (dense output)
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse=False)),
         ]
     )
 
@@ -220,8 +232,8 @@ def build_preprocessing_pipeline() -> Pipeline:
     return pipeline
 
 
-# Default data paths, relative to project root
-PROJECT_ROOT = Path(".").resolve()
+# Paths relative to repo root (parent of src)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RAW_PATH = PROJECT_ROOT / "data" / "raw" / "data.csv"
 DEFAULT_PROCESSED_PATH = PROJECT_ROOT / "data" / "processed" / "processed_features.csv"
 
@@ -239,6 +251,13 @@ def run_data_processing(
     processed_data_path: Optional[Union[str, Path]] = None,
     target_col: str = "FraudResult",
 ):
+    """
+    Run the full preprocessing pipeline on the raw data.
+
+    Saves a processed CSV to data/processed and returns:
+      - fitted pipeline
+      - processed dataframe (features + CustomerId + target)
+    """
     df = load_raw_data(raw_data_path)
     if target_col not in df.columns:
         raise ValueError(f"Target column {target_col!r} not in data")
@@ -278,6 +297,42 @@ def run_data_processing(
     processed_df.to_csv(out_path, index=False)
 
     return pipeline, processed_df
+
+
+def compute_woe_iv(
+    df: pd.DataFrame,
+    target_col: str = "FraudResult",
+    feature_names: Union[str, List[str]] = "all",
+    exclude_features: Optional[List[str]] = None,
+) -> Tuple[WOETransformer, pd.DataFrame, pd.DataFrame]:
+    """
+    Convenience helper that runs a WOE transformation on the given dataframe
+    and returns:
+      - the fitted WOETransformer
+      - the WoE table
+      - the IV table
+    """
+    if WOE is None:
+        raise ImportError(
+            "xverse is not installed. Install it with 'pip install xverse' "
+            "before calling compute_woe_iv."
+        )
+
+    if target_col not in df.columns:
+        raise ValueError(f"Target column {target_col!r} not in dataframe")
+
+    y = df[target_col]
+    X = df.drop(columns=[target_col])
+
+    woe_tr = WOETransformer(
+        feature_names=feature_names,
+        exclude_features=exclude_features,
+    )
+    woe_tr.fit(X, y)
+    _ = woe_tr.transform(X)
+
+    return woe_tr, woe_tr.woe_df_, woe_tr.iv_df_
+
 
 def compute_rfm_features(
     df: pd.DataFrame,
@@ -348,6 +403,7 @@ def cluster_customers_rfm(
 
     return rfm_clustered, scaler, kmeans
 
+
 def label_high_risk_cluster(
     rfm_clustered: pd.DataFrame,
     customer_id_col: str = "CustomerId",
@@ -400,40 +456,6 @@ def label_high_risk_cluster(
     rfm_labeled["is_high_risk"] = (rfm_labeled["rfm_cluster"] == high_risk_cluster).astype(int)
 
     return rfm_labeled, summary, high_risk_cluster
-
-def compute_woe_iv(
-    df: pd.DataFrame,
-    target_col: str = "FraudResult",
-    feature_names: Union[str, List[str]] = "all",
-    exclude_features: Optional[List[str]] = None,
-) -> Tuple[WOETransformer, pd.DataFrame, pd.DataFrame]:
-    """
-    Convenience helper that runs a WOE transformation on the given dataframe
-    and returns:
-      - the fitted WOETransformer
-      - the WoE table
-      - the IV table
-    """
-    if WOE is None:
-        raise ImportError(
-            "xverse is not installed. Install it with 'pip install xverse' before calling compute_woe_iv."
-        )
-
-    if target_col not in df.columns:
-        raise ValueError(f"Target column {target_col!r} not in dataframe")
-
-    y = df[target_col]
-    X = df.drop(columns=[target_col])
-
-    woe_tr = WOETransformer(
-        feature_names=feature_names,
-        exclude_features=exclude_features,
-    )
-    woe_tr.fit(X, y)
-    # Transform is not strictly needed if you only want IV, but we keep it for completeness
-    _ = woe_tr.transform(X)
-
-    return woe_tr, woe_tr.woe_df_, woe_tr.iv_df_
 
 
 def build_model_dataset_with_proxy_target(
