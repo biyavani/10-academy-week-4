@@ -318,6 +318,36 @@ def compute_rfm_features(
     return rfm, snapshot_date
 
 
+def cluster_customers_rfm(
+    rfm_df: pd.DataFrame,
+    n_clusters: int = 3,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, StandardScaler, KMeans]:
+    """
+    Run KMeans on RFM features and assign a cluster to each customer.
+    """
+    required_cols = ["recency", "frequency", "monetary"]
+    for col in required_cols:
+        if col not in rfm_df.columns:
+            raise ValueError(f"{col!r} not in RFM dataframe")
+
+    rfm_values = rfm_df[required_cols].values
+
+    scaler = StandardScaler()
+    rfm_scaled = scaler.fit_transform(rfm_values)
+
+    kmeans = KMeans(
+        n_clusters=n_clusters,
+        random_state=random_state,
+        n_init=10,
+    )
+    cluster_labels = kmeans.fit_predict(rfm_scaled)
+
+    rfm_clustered = rfm_df.copy()
+    rfm_clustered["rfm_cluster"] = cluster_labels
+
+    return rfm_clustered, scaler, kmeans
+
 
 def compute_woe_iv(
     df: pd.DataFrame,
