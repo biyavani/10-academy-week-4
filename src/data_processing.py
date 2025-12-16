@@ -10,6 +10,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from xverse.transformer import WOE
 
 
 class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
@@ -100,3 +101,38 @@ class ColumnDropper(BaseEstimator, TransformerMixin):
         X = X.copy()
         drop_cols = [c for c in self.columns if c in X.columns]
         return X.drop(columns=drop_cols)
+    
+class WOETransformer(BaseEstimator, TransformerMixin):
+    """
+    Thin wrapper around xverse.transformer.WOE so it can be used like a normal
+    scikit learn transformer.
+
+    This is optional and used mainly for inspecting Weight of Evidence
+    and Information Value.
+    """
+    def __init__(
+        self,
+        feature_names: Union[str, List[str]] = "all",
+        exclude_features: Optional[List[str]] = None,
+    ):
+        self.feature_names = feature_names
+        self.exclude_features = exclude_features
+
+    def fit(self, X: pd.DataFrame, y: Union[pd.Series, np.ndarray]):
+        if WOE is None:
+            raise ImportError(
+                "xverse is not installed. Install it with 'pip install xverse' "
+                "before using WOETransformer."
+            )
+        self._woe = WOE(
+            feature_names=self.feature_names,
+            exclude_features=self.exclude_features,
+        )
+        self._woe.fit(X, y)
+        # Save WoE and IV tables for later inspection
+        self.iv_df_ = self._woe.iv_df.copy()
+        self.woe_df_ = self._woe.woe_df.copy()
+        return self
+
+    def transform(self, X: pd.DataFrame):
+        return self._woe.transform(X)
