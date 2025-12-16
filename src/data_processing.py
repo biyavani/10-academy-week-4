@@ -256,11 +256,16 @@ def run_data_processing(
     pipeline = build_preprocessing_pipeline()
     X_processed = pipeline.fit_transform(X, y)
 
+    # If the output is a sparse matrix, convert it to a dense numpy array
+    if hasattr(X_processed, "toarray"):
+        X_processed = X_processed.toarray()
+
     # Recover feature names from the ColumnTransformer
     preprocessor = pipeline.named_steps["preprocess"]
     feature_names = preprocessor.get_feature_names_out()
 
     processed_df = pd.DataFrame(X_processed, columns=feature_names)
+
     processed_df[target_col] = y.values
 
     out_path = (
