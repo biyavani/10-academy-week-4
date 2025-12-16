@@ -136,3 +136,184 @@ class WOETransformer(BaseEstimator, TransformerMixin):
 
     def transform(self, X: pd.DataFrame):
         return self._woe.transform(X)
+
+
+def build_preprocessing_pipeline() -> Pipeline:
+    """
+    Build the full preprocessing pipeline for Task 3.
+
+    Steps:
+      1. CustomerAggregateFeatures - aggregate Amount per CustomerId
+      2. DateTimeFeatures - extract hour/day/month/year
+      3. ColumnDropper - drop ID like columns
+      4. ColumnTransformer - impute missing, scale numerics, one hot encode categoricals
+    """
+
+    # Numerical columns that should be scaled
+    numeric_features = [
+        "Amount",
+        "Value",
+        "PricingStrategy",
+        "total_amount",
+        "avg_amount",
+        "txn_count",
+        "std_amount",
+        "txn_hour",
+        "txn_day",
+        "txn_month",
+        "txn_year",
+    ]
+
+    # Categorical columns to encode
+    categorical_features = [
+        "ProviderId",
+        "ProductId",
+        "ProductCategory",
+        "ChannelId",
+    ]
+
+    # Numerical pipeline: impute then standardize
+    numeric_transformer = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ]
+    )
+
+    # Categorical pipeline: impute then one hot encode
+    categorical_transformer = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        ]
+    )
+
+    # Combine numeric and categorical transformers
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_transformer, numeric_features),
+            ("cat", categorical_transformer, categorical_features),
+        ]
+    )
+
+    # Columns that are IDs or constants, not useful as features
+    id_columns = [
+        "TransactionId",
+        "BatchId",
+        "AccountId",
+        "SubscriptionId",
+        "CustomerId",
+        "CurrencyCode",
+        "CountryCode",
+        "TransactionStartTime",
+    ]
+
+    pipeline = Pipeline(
+        steps=[
+            ("aggregate", CustomerAggregateFeatures()),
+            ("datetime", DateTimeFeatures()),
+            ("drop", ColumnDropper(columns=id_columns)),
+            ("preprocess", preprocessor),
+        ]
+    )
+    return pipeline
+
+
+# Default data paths, relative to project root
+PROJECT_ROOT = Path(".").resolve()
+DEFAULT_RAW_PATH = PROJECT_ROOT / "data" / "raw" / "data.csv"
+DEFAULT_PROCESSED_PATH = PROJECT_ROOT / "data" / "processed" / "processed_features.csv"
+
+
+def load_raw_data(path: Optional[Union[str, Path]] = None) -> pd.DataFrame:
+    """
+    Load the raw Xente dataset from CSV.
+    """
+    path = Path(path) if path is not None else DEFAULT_RAW_PATH
+    return pd.read_csv(path)
+
+
+def run_data_processing(
+    raw_data_path: Optional[Union[str, Path]] = None,
+    processed_data_path: Optional[Union[str, Path]] = None,
+    target_col: str = "FraudResult",
+):
+    """
+    Run the full preprocessing pipeline on the raw data.
+
+    Saves a processed CSV to data/processed and returns:
+      - fitted pipeline
+      - processed dataframe (features + target)
+    """
+    df = load_raw_data(raw_data_path)
+    if target_col not in df.columns:
+        raise ValueError(f"Target column {target_col!r} not in data")
+
+    # Separate features and target
+    y = df[target_col].copy()
+    X = df.drop(columns=[target_col])
+
+    pipeline = build_preprocessing_pipeline()
+    X_processed = pipeline.fit_transform(X, y)
+
+    # Recover feature names from the ColumnTransformer
+    preprocessor = pipeline.named_steps["preprocess"]
+    feature_names = preprocessor.get_feature_names_out()
+
+    processed_df = pd.DataFrame(X_processed, columns=feature_names)
+    processed_df[target_col] = y.values
+
+    out_path = (
+        Path(processed_data_path)
+        if processed_data_path is not None
+        else DEFAULT_PROCESSED_PATH
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    processed_df.to_csv(out_path, index=False)
+
+    return pipeline, processed_df
+
+
+def compute_woe_iv(
+    df: pd.DataFrame,
+    target_col: str = "FraudResult",
+    feature_names: Union[str, List[str]] = "all",
+    exclude_features: Optional[List[str]] = None,
+) -> Tuple[WOETransformer, pd.DataFrame, pd.DataFrame]:
+    """
+    Convenience helper that runs a WOE transformation on the given dataframe
+    and returns:
+      - the fitted WOETransformer
+      - the WoE table
+      - the IV table
+    """
+    if WOE is None:
+        raise ImportError(
+            "xverse is not installed. Install it with 'pip install xverse' before calling compute_woe_iv."
+        )
+
+    if target_col not in df.columns:
+        raise ValueError(f"Target column {target_col!r} not in dataframe")
+
+    y = df[target_col]
+    X = df.drop(columns=[target_col])
+
+    woe_tr = WOETransformer(
+        feature_names=feature_names,
+        exclude_features=exclude_features,
+    )
+    woe_tr.fit(X, y)
+    # Transform is not strictly needed if you only want IV, but we keep it for completeness
+    _ = woe_tr.transform(X)
+
+    return woe_tr, woe_tr.woe_df_, woe_tr.iv_df_
+
+
+if __name__ == "__main__":
+    print("Running data processing...")
+    try:
+        pipe, processed = run_data_processing()
+        print("Processed data shape:", processed.shape)
+        print(f"Saved processed features to: {DEFAULT_PROCESSED_PATH}")
+    except FileNotFoundError:
+        print("Raw data not found. Place data.csv in data/raw before running this script.")
