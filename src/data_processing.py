@@ -61,3 +61,42 @@ class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
         # Left join so each transaction row gets customer level features
         X = X.merge(agg, on=self.customer_id_col, how="left", validate="m:1")
         return X
+    
+
+
+class DateTimeFeatures(BaseEstimator, TransformerMixin):
+    """
+    Extracts hour, day, month, year from TransactionStartTime.
+    """
+    def __init__(self, datetime_col: str = "TransactionStartTime"):
+        self.datetime_col = datetime_col
+
+    def fit(self, X: pd.DataFrame, y=None):
+        if self.datetime_col not in X.columns:
+            raise ValueError(f"Column {self.datetime_col!r} not in input data")
+        return self
+
+    def transform(self, X: pd.DataFrame):
+        X = X.copy()
+        dt = pd.to_datetime(X[self.datetime_col], errors="coerce", utc=True)
+        X["txn_hour"] = dt.dt.hour
+        X["txn_day"] = dt.dt.day
+        X["txn_month"] = dt.dt.month
+        X["txn_year"] = dt.dt.year
+        return X
+
+
+class ColumnDropper(BaseEstimator, TransformerMixin):
+    """
+    Drops a list of columns if they exist.
+    """
+    def __init__(self, columns: Optional[List[str]] = None):
+        self.columns = columns or []
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+        drop_cols = [c for c in self.columns if c in X.columns]
+        return X.drop(columns=drop_cols)
