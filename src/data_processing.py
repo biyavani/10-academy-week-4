@@ -11,6 +11,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xverse.transformer import WOE
+from sklearn.cluster import KMeans   
 
 
 class CustomerAggregateFeatures(BaseEstimator, TransformerMixin):
@@ -238,13 +239,6 @@ def run_data_processing(
     processed_data_path: Optional[Union[str, Path]] = None,
     target_col: str = "FraudResult",
 ):
-    """
-    Run the full preprocessing pipeline on the raw data.
-
-    Saves a processed CSV to data/processed and returns:
-      - fitted pipeline
-      - processed dataframe (features + target)
-    """
     df = load_raw_data(raw_data_path)
     if target_col not in df.columns:
         raise ValueError(f"Target column {target_col!r} not in data")
@@ -252,6 +246,11 @@ def run_data_processing(
     # Separate features and target
     y = df[target_col].copy()
     X = df.drop(columns=[target_col])
+
+    # Keep CustomerId for later merge with RFM labels
+    if "CustomerId" not in X.columns:
+        raise ValueError("CustomerId column is missing from the data")
+    customer_ids = X["CustomerId"].copy()
 
     pipeline = build_preprocessing_pipeline()
     X_processed = pipeline.fit_transform(X, y)
@@ -266,6 +265,8 @@ def run_data_processing(
 
     processed_df = pd.DataFrame(X_processed, columns=feature_names)
 
+    # Add CustomerId and original FraudResult back as columns
+    processed_df["CustomerId"] = customer_ids.values
     processed_df[target_col] = y.values
 
     out_path = (
@@ -278,6 +279,127 @@ def run_data_processing(
 
     return pipeline, processed_df
 
+def compute_rfm_features(
+    df: pd.DataFrame,
+    customer_id_col: str = "CustomerId",
+    datetime_col: str = "TransactionStartTime",
+    monetary_col: str = "Value",
+) -> Tuple[pd.DataFrame, pd.Timestamp]:
+    """
+    Compute RFM (Recency, Frequency, Monetary) per customer.
+
+    Recency: days since last transaction (higher means less recent).
+    Frequency: number of transactions.
+    Monetary: total transaction value.
+    """
+    if customer_id_col not in df.columns:
+        raise ValueError(f"{customer_id_col!r} not in dataframe")
+    if datetime_col not in df.columns:
+        raise ValueError(f"{datetime_col!r} not in dataframe")
+    if monetary_col not in df.columns:
+        raise ValueError(f"{monetary_col!r} not in dataframe")
+
+    df = df.copy()
+    df[datetime_col] = pd.to_datetime(df[datetime_col], utc=True, errors="coerce")
+
+    # Snapshot date: one day after the last transaction in the data
+    snapshot_date = df[datetime_col].max() + pd.Timedelta(days=1)
+
+    rfm = (
+        df.groupby(customer_id_col)
+        .agg(
+            recency=(datetime_col, lambda x: (snapshot_date - x.max()).days),
+            frequency=(customer_id_col, "size"),
+            monetary=(monetary_col, "sum"),
+        )
+        .reset_index()
+    )
+
+    return rfm, snapshot_date
+
+
+def cluster_customers_rfm(
+    rfm_df: pd.DataFrame,
+    n_clusters: int = 3,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, StandardScaler, KMeans]:
+    """
+    Run KMeans on RFM features and assign a cluster to each customer.
+    """
+    required_cols = ["recency", "frequency", "monetary"]
+    for col in required_cols:
+        if col not in rfm_df.columns:
+            raise ValueError(f"{col!r} not in RFM dataframe")
+
+    rfm_values = rfm_df[required_cols].values
+
+    scaler = StandardScaler()
+    rfm_scaled = scaler.fit_transform(rfm_values)
+
+    kmeans = KMeans(
+        n_clusters=n_clusters,
+        random_state=random_state,
+        n_init=10,
+    )
+    cluster_labels = kmeans.fit_predict(rfm_scaled)
+
+    rfm_clustered = rfm_df.copy()
+    rfm_clustered["rfm_cluster"] = cluster_labels
+
+    return rfm_clustered, scaler, kmeans
+
+def label_high_risk_cluster(
+    rfm_clustered: pd.DataFrame,
+    customer_id_col: str = "CustomerId",
+) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
+    """
+    Identify the least engaged RFM cluster and create is_high_risk.
+
+    Least engaged means:
+      - high recency (long time since last transaction)
+      - low frequency
+      - low monetary
+    """
+    if "rfm_cluster" not in rfm_clustered.columns:
+        raise ValueError("rfm_cluster column is missing. Run cluster_customers_rfm first.")
+
+    summary = (
+        rfm_clustered
+        .groupby("rfm_cluster")
+        .agg(
+            avg_recency=("recency", "mean"),
+            avg_frequency=("frequency", "mean"),
+            avg_monetary=("monetary", "mean"),
+            customer_count=(customer_id_col, "nunique"),
+        )
+        .reset_index()
+    )
+
+    # Normalize metrics to [0, 1] to build a simple risk score
+    for col in ["avg_recency", "avg_frequency", "avg_monetary"]:
+        cmin = summary[col].min()
+        cmax = summary[col].max()
+        if cmax > cmin:
+            summary[col + "_norm"] = (summary[col] - cmin) / (cmax - cmin)
+        else:
+            summary[col + "_norm"] = 0.0
+
+    # Higher recency increases risk, higher frequency and monetary decrease risk
+    summary["risk_score"] = (
+        summary["avg_recency_norm"]
+        - summary["avg_frequency_norm"]
+        - summary["avg_monetary_norm"]
+    )
+
+    # Cluster with the highest risk_score is treated as high risk
+    high_risk_cluster = int(
+        summary.sort_values("risk_score", ascending=False).iloc[0]["rfm_cluster"]
+    )
+
+    rfm_labeled = rfm_clustered.copy()
+    rfm_labeled["is_high_risk"] = (rfm_labeled["rfm_cluster"] == high_risk_cluster).astype(int)
+
+    return rfm_labeled, summary, high_risk_cluster
 
 def compute_woe_iv(
     df: pd.DataFrame,
@@ -314,11 +436,84 @@ def compute_woe_iv(
     return woe_tr, woe_tr.woe_df_, woe_tr.iv_df_
 
 
+def build_model_dataset_with_proxy_target(
+    raw_data_path: Optional[Union[str, Path]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Complete Task 4 pipeline:
+
+      1. Compute RFM per customer.
+      2. Cluster customers into 3 segments.
+      3. Label the least engaged cluster as high risk (is_high_risk = 1).
+      4. Merge is_high_risk into the main processed dataset.
+      5. Aggregate to one row per customer for model training.
+
+    Returns:
+      - customer_level_df: one row per customer with features and is_high_risk
+      - rfm_labeled: RFM table with cluster and is_high_risk
+    """
+    # 1. Load raw data
+    df_raw = load_raw_data(raw_data_path)
+
+    # 2. RFM metrics
+    rfm_df, snapshot_date = compute_rfm_features(df_raw)
+    print("RFM snapshot date:", snapshot_date)
+
+    # 3. Cluster customers
+    rfm_clustered, scaler, kmeans = cluster_customers_rfm(rfm_df)
+
+    # 4. Label high risk cluster
+    rfm_labeled, cluster_summary, high_risk_cluster = label_high_risk_cluster(rfm_clustered)
+    print("High risk cluster id:", high_risk_cluster)
+    print("Cluster summary:")
+    print(cluster_summary)
+
+    # Save RFM labels for reference
+    rfm_out_path = PROJECT_ROOT / "data" / "processed" / "rfm_labels.csv"
+    rfm_out_path.parent.mkdir(parents=True, exist_ok=True)
+    rfm_labeled.to_csv(rfm_out_path, index=False)
+    print("Saved RFM labels to:", rfm_out_path)
+
+    # 5. Get processed transaction level features from Task 3
+    _, processed_df = run_data_processing(raw_data_path=raw_data_path)
+
+    # 6. Merge is_high_risk onto processed data using CustomerId
+    merged = processed_df.merge(
+        rfm_labeled[["CustomerId", "is_high_risk"]],
+        on="CustomerId",
+        how="left",
+    )
+
+    # 7. Aggregate to one row per customer
+    feature_cols = [
+        c for c in merged.columns
+        if c not in ["CustomerId", "FraudResult", "is_high_risk"]
+    ]
+
+    customer_level_df = (
+        merged
+        .groupby(["CustomerId", "is_high_risk"])[feature_cols]
+        .mean()
+        .reset_index()
+    )
+
+    model_out_path = PROJECT_ROOT / "data" / "processed" / "model_data_customers.csv"
+    customer_level_df.to_csv(model_out_path, index=False)
+    print("Saved customer level model dataset to:", model_out_path)
+
+    return customer_level_df, rfm_labeled
+
+
 if __name__ == "__main__":
-    print("Running data processing...")
     try:
+        print("Running data processing (Task 3)...")
         pipe, processed = run_data_processing()
         print("Processed data shape:", processed.shape)
         print(f"Saved processed features to: {DEFAULT_PROCESSED_PATH}")
+
+        print("\nRunning proxy target engineering (Task 4)...")
+        customer_df, rfm_labeled = build_model_dataset_with_proxy_target()
+        print("Customer level dataset shape:", customer_df.shape)
+
     except FileNotFoundError:
         print("Raw data not found. Place data.csv in data/raw before running this script.")
