@@ -436,6 +436,74 @@ def compute_woe_iv(
     return woe_tr, woe_tr.woe_df_, woe_tr.iv_df_
 
 
+def build_model_dataset_with_proxy_target(
+    raw_data_path: Optional[Union[str, Path]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Complete Task 4 pipeline:
+
+      1. Compute RFM per customer.
+      2. Cluster customers into 3 segments.
+      3. Label the least engaged cluster as high risk (is_high_risk = 1).
+      4. Merge is_high_risk into the main processed dataset.
+      5. Aggregate to one row per customer for model training.
+
+    Returns:
+      - customer_level_df: one row per customer with features and is_high_risk
+      - rfm_labeled: RFM table with cluster and is_high_risk
+    """
+    # 1. Load raw data
+    df_raw = load_raw_data(raw_data_path)
+
+    # 2. RFM metrics
+    rfm_df, snapshot_date = compute_rfm_features(df_raw)
+    print("RFM snapshot date:", snapshot_date)
+
+    # 3. Cluster customers
+    rfm_clustered, scaler, kmeans = cluster_customers_rfm(rfm_df)
+
+    # 4. Label high risk cluster
+    rfm_labeled, cluster_summary, high_risk_cluster = label_high_risk_cluster(rfm_clustered)
+    print("High risk cluster id:", high_risk_cluster)
+    print("Cluster summary:")
+    print(cluster_summary)
+
+    # Save RFM labels for reference
+    rfm_out_path = PROJECT_ROOT / "data" / "processed" / "rfm_labels.csv"
+    rfm_out_path.parent.mkdir(parents=True, exist_ok=True)
+    rfm_labeled.to_csv(rfm_out_path, index=False)
+    print("Saved RFM labels to:", rfm_out_path)
+
+    # 5. Get processed transaction level features from Task 3
+    _, processed_df = run_data_processing(raw_data_path=raw_data_path)
+
+    # 6. Merge is_high_risk onto processed data using CustomerId
+    merged = processed_df.merge(
+        rfm_labeled[["CustomerId", "is_high_risk"]],
+        on="CustomerId",
+        how="left",
+    )
+
+    # 7. Aggregate to one row per customer
+    feature_cols = [
+        c for c in merged.columns
+        if c not in ["CustomerId", "FraudResult", "is_high_risk"]
+    ]
+
+    customer_level_df = (
+        merged
+        .groupby(["CustomerId", "is_high_risk"])[feature_cols]
+        .mean()
+        .reset_index()
+    )
+
+    model_out_path = PROJECT_ROOT / "data" / "processed" / "model_data_customers.csv"
+    customer_level_df.to_csv(model_out_path, index=False)
+    print("Saved customer level model dataset to:", model_out_path)
+
+    return customer_level_df, rfm_labeled
+
+
 if __name__ == "__main__":
     print("Running data processing...")
     try:
